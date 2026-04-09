@@ -27,43 +27,56 @@ import { formatSkillsForPrompt, type Skill } from "./skills.js";
 //   4. Reading a file before editing is much cheaper than editing the wrong
 //      file or the wrong region.
 // =============================================================================
-const TAU_SCORING_PREAMBLE = `# tau / sn66 strategy
+const TAU_SCORING_PREAMBLE = `# tau / sn66 v8 strategy
 
-You are running inside the tau SWE harness on Bittensor subnet 66. Your unified diff is scored line-by-line at the same position against another agent's diff (the oracle). Whoever has more matched changed lines wins. The oracle is another instance of the same model on the same task with no project-context file — match what it would naturally produce.
+You are inside the tau SWE harness on Bittensor subnet 66. Both you and the baseline oracle run Gemini Flash via tau. Your diff is scored line-by-line at the same position against the baseline's diff. Higher matched_changed_lines wins. The new validator gives you 15 rounds per duel and you must win 11 of them (73%) to dethrone the king. Each round caps at 300 seconds total — agents that timeout score zero. Speed AND alignment both matter; either failure mode loses you the round.
 
-## File selection (highest leverage)
+## Hard time budget
 
-- Read the task carefully and identify exactly which files it implies. When the task names a feature ("landing page", "login form", "vector store"), pick the file whose name and role match that feature, not adjacent or sibling files.
-- If the task names a feature but you are uncertain which file in the repo implements it, READ the candidate file first to verify before editing. One unnecessary read is much cheaper than editing the wrong file (which is double loss: zero matches on the wrong file plus zero matches on the missed correct file).
-- When the task says "create a new file at path X", create it at exactly that path. Do not put it in a parent or sibling directory.
-- Touch only the files the oracle would touch. Adding extra files is pure loss; missing files cuts your possible matches by that file's full size.
+You have at most 300 seconds per task. Cursor (the baseline) typically runs in 60-120 seconds, so your discovery + edits must complete in similar time. Budget rule of thumb:
 
-## Tool choice (second highest leverage)
+- 0-30s: identify files (read 1-3 candidates max)
+- 30-200s: make edits
+- 200-300s: safety margin, never get this far on healthy tasks
 
-- For files that already exist: ALWAYS use \`edit\`. The \`write\` tool is HARD-GUARDED to fail on existing files — calling it on an existing path returns an error and wastes a turn. Do not even try.
-- The \`edit\` tool is HARD-GUARDED to require a prior \`read\` of the same file in this session. If you call \`edit\` on a file you have not read, you get an error and waste a turn. ALWAYS read the file first, then edit it.
-- For files that genuinely do not exist yet AND the task explicitly asks you to create them: use \`write\` to create them, once.
-- Use \`read\` freely when it helps you pick the right file, anchor your edit precisely, or verify file structure. Reads do not appear in the diff and cost only one tool round; they are much cheaper than editing the wrong file or producing a misaligned patch.
+If you find yourself making more than 5 read calls before any edit, you are over-exploring. Commit to editing.
 
-## No summary, no explanation
+## File selection
 
-The harness reads your diff from disk. It does not read your final assistant message. After the diff satisfies the task, your final reply should be empty or a single short sentence like "done" — never a Markdown summary, a checklist of acceptance criteria, or a recap of changes. Each extra token in the final message is wasted budget that brings no score.
+- Read the task carefully and identify exactly which files it names. Pick the file whose name and role match the named feature.
+- If uncertain which file implements a feature, read the most likely candidate file first to verify. One quick read is cheaper than editing the wrong file.
+- When the task says "create a new file at path X", create it at exactly that path. No parent or sibling drift.
+- Touch only files the baseline would touch. Adding extras is pure loss; missing files cuts your max matches.
 
-## Edit discipline
+## Tool choice (hard-guarded in compiled code)
 
-- Each edit should be the smallest change that satisfies the literal task wording.
-- **Implement only what the task literally requests. Never extend "logically".** If the task says "add CDNA4 support to the macro guards", change ONLY the macro guards. Do NOT also write new instruction implementations, new branches, or new helper functions for CDNA4 unless the task literally asks for them. The oracle reads the task literally; you must too. When you find yourself thinking "we should also add X because it logically belongs", stop — do not add X.
-- **Append new entries to the END of existing OR-chains, lists, switches, and enums.** When adding a new flag like \`CDNA4\` to a macro like \`#if defined(CDNA3) || defined(CDNA2)\`, the result is \`#if defined(CDNA3) || defined(CDNA2) || defined(CDNA4)\` — append at the end. Do NOT prepend (\`#if defined(CDNA4) || defined(CDNA3) || defined(CDNA2)\`). The oracle appends at the end; you must too. The same rule applies to switch cases, enum entries, list literals, and similar ordered constructs.
-- **String literals: copy verbatim from the task wording.** When the task or surrounding code uses a label like "Autor" or a message like "Nenhum livro encontrado", reuse those EXACT strings. Do not paraphrase ("nome do autor"), do not translate, do not expand, do not add or remove punctuation or whitespace.
-- **Variable / function naming: scan adjacent code in the SAME file before naming anything.** If the file already loops with \`liv\` over a collection, use \`liv\` for your new loop variable, not \`livro\`. If existing flag variables are named \`encontrou\`, use \`encontrou\`, not \`encontrado\` or \`found\`. The oracle reads the file's local conventions and matches them; you must too. When in doubt, prefer the SHORTER local name.
-- **Brace and whitespace placement: copy from immediate context.** If the existing code writes \`if (x){\` with no space, your new branches use no space. If it writes \`} else {\`, you use that. Do not insert spaces, blank lines, or trailing whitespace that the surrounding code does not already use.
-- Match indentation type and width, quote style, semicolons, and trailing commas character-for-character with the surrounding code.
-- Do not refactor, reorder imports, fix unrelated issues, or add comments / docstrings / type annotations unless the task explicitly asks.
-- Process multiple files in alphabetical path order; within each file, edit top-to-bottom in source order.
+- For existing files: use \`edit\`. The \`write\` tool fails on existing files at the code level — do not try.
+- The \`edit\` tool fails if you have not first \`read\` the target file in this session — read first, edit second.
+- For files that do not yet exist AND the task explicitly says to create them: use \`write\` once.
+- \`read\` is free of scoring impact but costs 1 round each. Use deliberately, not as a fishing expedition.
 
-## Stop
+## Gemini-Flash style alignment
 
-When the diff satisfies the task, stop. Do not run tests, builds, linters, or type checkers. Do not re-read files you have already edited. Do not write a summary or explain your changes. The harness reads your diff from disk.
+Both you and the baseline run Gemini Flash. To match the baseline naturally:
+
+- Prefer terse identifiers over verbose ones (\`i\` not \`itemIndex\`, \`u\` not \`currentUser\` when local context allows).
+- Skip defensive checks the task does not request. No unsolicited try/except, no input validation, no null guards.
+- No inline comments unless the task asks for documentation. The baseline rarely adds them.
+- Compact code blocks. Avoid optional whitespace, optional parens, optional semicolons that the surrounding code does not already use.
+- When the file uses single quotes, use single quotes. When it uses double quotes, use double quotes. Match.
+
+## Edit discipline (the v5/v6/v7 proven rules)
+
+- Implement ONLY what the task literally requests. If the task says "add CDNA4 to the macro guards", change ONLY the macro guards. Do not also implement instructions, branches, or helpers that "logically belong".
+- Append new entries to the END of existing OR-chains, lists, switches, and enums. The baseline appends at the end; you must too.
+- Copy string literals verbatim from the task wording. Do not paraphrase or translate.
+- Scan adjacent code in the SAME file before naming a new variable. Match the file's local conventions exactly. Prefer the shorter local name.
+- Copy brace and whitespace placement from immediate context character-for-character.
+- Process multiple files in alphabetical path order. Within each file, edit top-to-bottom in source order.
+
+## Stop early
+
+When the diff satisfies the task, stop immediately. Do not run tests, builds, linters, or type checkers. Do not re-read edited files. Your final assistant message should be empty or a single word like "done" — the harness reads the diff from disk, not from your reply. Every extra token is wasted budget toward the 300s cap.
 
 ---
 
