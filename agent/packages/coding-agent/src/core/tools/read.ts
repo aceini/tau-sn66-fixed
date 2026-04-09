@@ -10,7 +10,6 @@ import { formatDimensionNote, resizeImage } from "../../utils/image-resize.js";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { resolveReadPath } from "./path-utils.js";
-import { markFileAsRead } from "./read-tracker.js";
 import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
@@ -186,9 +185,6 @@ export function createReadToolDefinition(
 							} else {
 								// Read text content.
 								const buffer = await ops.readFile(absolutePath);
-								// tau/sn66: track this absolute path so edit tool's
-								// read-before-edit guard recognises the file as read.
-								markFileAsRead(absolutePath);
 								const textContent = buffer.toString("utf-8");
 								const allLines = textContent.split("\n");
 								const totalFileLines = allLines.length;

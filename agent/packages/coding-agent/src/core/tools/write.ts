@@ -1,10 +1,8 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Container, Text } from "@mariozechner/pi-tui";
 import { type Static, Type } from "@sinclair/typebox";
-import { existsSync } from "fs";
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
-import { markFileAsRead } from "./read-tracker.js";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
@@ -189,11 +187,9 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			"Create a NEW file. FAILS if the file already exists — use the edit tool for existing files. Automatically creates parent directories.",
-		promptSnippet: "Create new files only (fails on existing files)",
-		promptGuidelines: [
-			"Use write ONLY to create files that do not yet exist. Write FAILS on existing files; use edit instead.",
-		],
+			"Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+		promptSnippet: "Create or overwrite files",
+		promptGuidelines: ["Use write only for new files or complete rewrites."],
 		parameters: writeSchema,
 		async execute(
 			_toolCallId,
@@ -203,22 +199,6 @@ export function createWriteToolDefinition(
 			_ctx?,
 		) {
 			const absolutePath = resolveToCwd(path, cwd);
-			// tau/sn66 hard guard: write only creates new files. Wholesale
-			// rewrite of an existing file produces a huge diff that won't
-			// position-align with the oracle's surgical edit. Force the model
-			// to use the edit tool for any file that already exists.
-			if (existsSync(absolutePath)) {
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: `write failed: ${path} already exists. Use the edit tool to modify existing files; write is only for creating new files.`,
-						},
-					],
-					details: undefined,
-					isError: true,
-				};
-			}
 			const dir = dirname(absolutePath);
 			return withFileMutationQueue(
 				absolutePath,
@@ -242,9 +222,6 @@ export function createWriteToolDefinition(
 									if (aborted) return;
 									// Write the file contents.
 									await ops.writeFile(absolutePath, content);
-									// tau/sn66: mark new file as "read" so subsequent edits
-									// in the same session don't trigger the read-before-edit guard.
-									markFileAsRead(absolutePath);
 									if (aborted) return;
 									signal?.removeEventListener("abort", onAbort);
 									resolve({

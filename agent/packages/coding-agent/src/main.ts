@@ -660,6 +660,28 @@ async function handleConfigCommand(args: string[]): Promise<boolean> {
 	process.exit(0);
 }
 
+function applySolverModeDefaults(parsed: Args): void {
+	// Docker validator runs use: --mode json --no-session -p "<task prompt>".
+	// Keep this path deterministic and low-overhead by disabling optional resource
+	// systems unless explicitly requested.
+	const isSolverLikeRun = parsed.mode === "json" && parsed.noSession === true;
+	if (!isSolverLikeRun) {
+		return;
+	}
+	if (!parsed.extensions && !parsed.noExtensions) {
+		parsed.noExtensions = true;
+	}
+	if (!parsed.skills && !parsed.noSkills) {
+		parsed.noSkills = true;
+	}
+	if (!parsed.promptTemplates && !parsed.noPromptTemplates) {
+		parsed.noPromptTemplates = true;
+	}
+	if (!parsed.themes && !parsed.noThemes) {
+		parsed.noThemes = true;
+	}
+}
+
 export async function main(args: string[]) {
 	resetTimings();
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
@@ -678,6 +700,12 @@ export async function main(args: string[]) {
 
 	// First pass: parse args to get --extension paths
 	const firstPass = parseArgs(args);
+	applySolverModeDefaults(firstPass);
+	const solverLikeRun = firstPass.mode === "json" && firstPass.noSession === true;
+	if (solverLikeRun && !isTruthyEnvFlag(process.env.PI_OFFLINE)) {
+		process.env.PI_OFFLINE = "1";
+		process.env.PI_SKIP_VERSION_CHECK = "1";
+	}
 	time("parseArgs.firstPass");
 	const shouldTakeOverStdout = firstPass.mode !== undefined || firstPass.print || !process.stdin.isTTY;
 	if (shouldTakeOverStdout) {
@@ -741,6 +769,7 @@ export async function main(args: string[]) {
 
 	// Second pass: parse args with extension flags
 	const parsed = parseArgs(args, extensionFlags);
+	applySolverModeDefaults(parsed);
 	time("parseArgs.secondPass");
 
 	// Pass flag values to extensions via runtime
@@ -858,6 +887,12 @@ export async function main(args: string[]) {
 		modelRegistry,
 		settingsManager,
 	);
+
+	// Non-interactive solver runs should prefer deterministic, lower-latency behavior.
+	// If the user did not explicitly pick a thinking level, default to "off".
+	if (!isInteractive && parsed.thinking === undefined && !cliThinkingFromModel) {
+		sessionOptions.thinkingLevel = "off";
+	}
 
 	if (parsed.apiKey) {
 		if (!sessionOptions.model) {
