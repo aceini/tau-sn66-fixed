@@ -164,6 +164,20 @@ async function runLoop(
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
+	// tau/sn66 v14: zero-diff prevention.
+	// Prod data (dashboard.json 2026-04-09) showed 50-71% of duel rounds
+	// produced 0 challenger_lines — the dominant failure mode is the agent
+	// stopping before it ever calls edit/write, NOT misalignment. When the
+	// agent does produce a diff, our sim_chall is competitive with the king.
+	// These counters force the agent toward an actual edit on every round.
+	let editCallCount = 0;
+	let consecutiveReadsWithoutEdit = 0;
+	let zeroDiffRetries = 0;
+	let providerErrorRetries = 0;
+	const MAX_ZERO_DIFF_RETRIES = 2;
+	const MAX_PROVIDER_ERROR_RETRIES = 3;
+	const READ_BUDGET_BEFORE_EDIT = 5;
+
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
 		let hasMoreToolCalls = true;
@@ -191,7 +205,35 @@ async function runLoop(
 			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
 			newMessages.push(message);
 
-			if (message.stopReason === "error" || message.stopReason === "aborted") {
+			if (message.stopReason === "aborted") {
+				await emit({ type: "turn_end", message, toolResults: [] });
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+
+			// tau/sn66 v14: provider-error retry. The dominant prod failure
+			// mode is OpenRouter / Gemini Flash returning finish_reason=error
+			// mid-stream while the model is writing a verbose narrative plan
+			// instead of calling tools. The partial text remains in context,
+			// so we just inject a continuation prompt and try again. This is
+			// the SINGLE biggest lever against 0-line diffs in production.
+			if (message.stopReason === "error") {
+				if (providerErrorRetries < MAX_PROVIDER_ERROR_RETRIES) {
+					providerErrorRetries++;
+					await emit({ type: "turn_end", message, toolResults: [] });
+					pendingMessages.push({
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text: "Your previous response was cut off by a provider error. STOP narrating your plan in chat. Make tool calls IMMEDIATELY. Do not write any explanatory text — call `read` or `edit` directly. Every turn must produce tool calls, not prose. The harness scores your diff from disk; chat text is wasted budget that can also trigger provider errors. Continue now with a tool call.",
+							},
+						],
+						timestamp: Date.now(),
+					});
+					hasMoreToolCalls = false;
+					continue;
+				}
 				await emit({ type: "turn_end", message, toolResults: [] });
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -209,11 +251,66 @@ async function runLoop(
 					currentContext.messages.push(result);
 					newMessages.push(result);
 				}
+
+				// tau/sn66 v14: track edit/read counters for zero-diff prevention.
+				for (const result of toolResults) {
+					const name = result.toolName;
+					if (name === "edit" || name === "write") {
+						editCallCount++;
+						consecutiveReadsWithoutEdit = 0;
+					} else if (name === "read") {
+						consecutiveReadsWithoutEdit++;
+					}
+				}
 			}
 
 			await emit({ type: "turn_end", message, toolResults });
 
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
+
+			// tau/sn66 v14: read-budget guard. If we have read 5+ files
+			// without producing any edit, force the model to commit to an
+			// edit. Reset the counter after injecting so we don't spam.
+			if (
+				editCallCount === 0 &&
+				consecutiveReadsWithoutEdit >= READ_BUDGET_BEFORE_EDIT &&
+				pendingMessages.length === 0
+			) {
+				pendingMessages.push({
+					role: "user",
+					content: [
+						{
+							type: "text",
+							text: "STOP READING. You have read enough files. Pick the most likely target file based on the task and call `edit` (or `write` for a new file) NOW. Do not read any more files. The harness scores your diff from disk — if you do not edit, you score 0 and lose this round.",
+						},
+					],
+					timestamp: Date.now(),
+				});
+				consecutiveReadsWithoutEdit = 0;
+			}
+
+			// tau/sn66 v14: zero-diff retry. If the assistant message had no
+			// tool calls AND we have not yet made any edit this session, the
+			// model is about to stop with a 0-line diff. Inject a retry asking
+			// for an explicit edit. Cap retries to avoid infinite loops.
+			if (
+				!hasMoreToolCalls &&
+				editCallCount === 0 &&
+				zeroDiffRetries < MAX_ZERO_DIFF_RETRIES &&
+				pendingMessages.length === 0
+			) {
+				zeroDiffRetries++;
+				pendingMessages.push({
+					role: "user",
+					content: [
+						{
+							type: "text",
+							text: "You stopped without editing any file. The harness scores your unified diff from disk — an empty diff scores 0 matched_changed_lines and loses this round by default. You MUST call `edit` (for an existing file) or `write` (for a new file) on at least one target file. Re-read the task, pick the file the task most directly names, and edit it now. Do not stop until you have produced at least one edit.",
+						},
+					],
+					timestamp: Date.now(),
+				});
+			}
 		}
 
 		// Agent would stop here. Check for follow-up messages.
