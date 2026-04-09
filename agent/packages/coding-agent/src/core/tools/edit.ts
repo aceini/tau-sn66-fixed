@@ -16,6 +16,7 @@ import {
 } from "./edit-diff.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { resolveToCwd } from "./path-utils.js";
+import { hasFileBeenRead, markFileAsRead } from "./read-tracker.js";
 import { invalidArgText, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
@@ -174,6 +175,23 @@ export function createEditToolDefinition(
 			const { path, edits } = validateEditInput(input);
 			const absolutePath = resolveToCwd(path, cwd);
 
+			// tau/sn66 hard guard: must read the file before editing it.
+			// Cursor (the validator's oracle) reads files broadly before editing,
+			// picking up local conventions. Forcing the same here improves
+			// positional alignment with cursor's diff and lifts matched_changed_lines.
+			if (!hasFileBeenRead(absolutePath)) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `edit failed: ${path} has not been read in this session. Use the read tool on ${path} first to load its current contents, then call edit. This is required to make sure your replacement text matches the file exactly and to align style with the existing code.`,
+						},
+					],
+					details: undefined,
+					isError: true,
+				};
+			}
+
 			return withFileMutationQueue(
 				absolutePath,
 				() =>
@@ -244,6 +262,11 @@ export function createEditToolDefinition(
 
 								const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 								await ops.writeFile(absolutePath, finalContent);
+
+								// tau/sn66: keep the file marked as "read" so follow-up
+								// edits in the same session don't trigger the guard.
+								// The model knows the new content because it just wrote it.
+								markFileAsRead(absolutePath);
 
 								// Check if aborted after writing.
 								if (aborted) {

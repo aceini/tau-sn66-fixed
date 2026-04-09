@@ -4,6 +4,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { existsSync } from "fs";
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
+import { markFileAsRead } from "./read-tracker.js";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
@@ -241,6 +242,9 @@ export function createWriteToolDefinition(
 									if (aborted) return;
 									// Write the file contents.
 									await ops.writeFile(absolutePath, content);
+									// tau/sn66: mark new file as "read" so subsequent edits
+									// in the same session don't trigger the read-before-edit guard.
+									markFileAsRead(absolutePath);
 									if (aborted) return;
 									signal?.removeEventListener("abort", onAbort);
 									resolve({
